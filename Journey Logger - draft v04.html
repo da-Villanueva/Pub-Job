@@ -1,0 +1,425 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Journeys Logger - Villanueva</title>
+
+  <!-- Bootstrap 5 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- PapaParse -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+
+  <style>
+    body { background:#f8f9fa; }
+    #map { height:460px; border-radius:8px; }
+    .metric-box { background:#fff; padding:12px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }
+    .chart-container { background:#fff; padding:10px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-bottom:16px; }
+    h6.chart-title { margin:0 0 6px 0; font-weight:600; font-size:0.95rem; text-align:center; }
+  </style>
+</head>
+<body>
+  <div class="container-fluid p-4">
+    <div class="row mb-3">
+      <div class="col text-center">
+        <h2 class="text-primary">📍 Journeys Logger - Villanueva</h2>
+        <p class="text-muted">Visualización y análisis de telemetría — carga un .csv / .log</p>
+      </div>
+    </div>
+
+    <!-- Controles -->
+    <div class="row g-3 mb-3">
+      <div class="col-md-4">
+        <label class="form-label">📂 Cargar archivo (.csv / .log)</label>
+        <input id="fileInput" type="file" class="form-control" accept=".csv,.log" />
+      </div>
+
+      <!-- === Nuevo: selector de fechas (select con "Todas las fechas" + días con datos) === -->
+      <div class="col-md-3">
+        <label class="form-label">📅 Fecha (días con datos)</label>
+        <select id="dateSelect" class="form-select">
+          <option value="all">Todas las fechas</option>
+        </select>
+      </div>
+
+      <div class="col-md-3">
+        <label class="form-label">🆔 Viaje (trip_id)</label>
+        <select id="tripSelect" class="form-select"><option value="">—</option></select>
+      </div>
+
+      <div class="col-md-2">
+        <label class="form-label">🚗 Transporte</label>
+        <select id="modeSelect" class="form-select"><option value="">Todos</option></select>
+      </div>
+    </div>
+
+    <!-- Mapa -->
+    <div class="row mb-3">
+      <div class="col-12">
+        <div id="map"></div>
+      </div>
+    </div>
+
+    <!-- Métricas -->
+    <div class="row text-center mb-3 g-3">
+      <div class="col-md-3"><div class="metric-box"><small class="text-muted">Duración total</small><div id="totalDuration" class="fw-bold">—</div></div></div>
+      <div class="col-md-3"><div class="metric-box"><small class="text-muted">Distancia total</small><div id="totalDistance" class="fw-bold">—</div></div></div>
+      <div class="col-md-3"><div class="metric-box"><small class="text-muted">Velocidad promedio</small><div id="avgSpeed" class="fw-bold">—</div></div></div>
+      <div class="col-md-3"><div class="metric-box"><small class="text-muted">Checkpoints</small><div id="checkpointCount" class="fw-bold">—</div></div></div>
+    </div>
+
+    <!-- Gráficas principales -->
+    <div class="row">
+      <div class="col-md-4">
+        <div class="chart-container">
+          <h6 class="chart-title">Velocidad promedio por tramo (km/h)</h6>
+          <canvas id="speedChart"></canvas>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="chart-container">
+          <h6 class="chart-title">Batería (%) vs Evento</h6>
+          <canvas id="batteryChart"></canvas>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <div class="chart-container">
+          <h6 class="chart-title">Distancia acumulada (km)</h6>
+          <canvas id="distanceChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gráficas adicionales solicitadas -->
+    <div class="row">
+      <div class="col-md-6">
+        <div class="chart-container">
+          <h6 class="chart-title">Altitud (m) vs Distancia acumulada (km)</h6>
+          <canvas id="altitudeChart"></canvas>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <div class="chart-container">
+          <h6 class="chart-title">Pendiente (%) por tramo</h6>
+          <canvas id="slopeChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="row mb-4">
+      <div class="col-12">
+        <div class="chart-container">
+          <h6 class="chart-title">Correlación: Velocidad (km/h) vs Pendiente (%)</h6>
+          <canvas id="speedSlopeChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Análisis automático -->
+    <div class="row">
+      <div class="col">
+        <div class="metric-box">
+          <h5>🧠 Análisis automático</h5>
+          <div id="analysisText" class="text-muted">Cargue un archivo para generar el análisis.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Librerías -->
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <script>
+  /*************************************************************************
+   * Versión corregida:
+   * - dateSelect es un <select> que muestra "Todas las fechas" + días con datos (y # de viajes)
+   * - extrae la fecha desde start_time de forma robusta (regex o Date)
+   * - al seleccionar fecha -> actualiza trips disponibles; al seleccionar trip -> actualiza modos
+   * - sin botón "aplicar": los select se actualizan automáticamente
+   *************************************************************************/
+
+  // Utilidad: extrae YYYY-MM-DD de start_time (maneja strings ISO, timestamps y objetos Date)
+  function extractDate(value) {
+    if (!value && value !== 0) return null;
+    if (typeof value === 'string') {
+      // 1) formato ISO al inicio: YYYY-MM-DD
+      const m = value.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (m) return m[1];
+      // 2) si viene con espacio o slash (ej: "2025/10/06 08:00" o "10/06/2025 08:00") intenta Date
+      const d = new Date(value);
+      if (!isNaN(d)) return d.toISOString().slice(0,10);
+      return null;
+    }
+    // si ya es Date u otro tipo
+    const d = new Date(value);
+    if (!isNaN(d)) return d.toISOString().slice(0,10);
+    return null;
+  }
+
+  // Inicializa el mapa y variables globales
+  let map, markers=[], polyline=null, charts = {};
+  let allData = []; // array con todas las filas parseadas
+
+  function initMap() {
+    map = L.map('map').setView([19.43, -99.13], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
+  }
+
+  // ------------------- Lectura del archivo -------------------
+  document.getElementById('fileInput').addEventListener('change', (evt) => {
+    const file = evt.target.files[0];
+    if (!file) return;
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      // no dynamicTyping for start_time consistency (we parse manually)
+      complete: (results) => {
+        // Filtramos filas inválidas y normalizamos keys esenciales
+        allData = results.data
+          .map(r => {
+            // Trim keys and values
+            const obj = {};
+            for (const k of Object.keys(r)) obj[k.trim()] = (r[k] !== undefined && r[k] !== null) ? String(r[k]).trim() : r[k];
+            return obj;
+          })
+          .filter(r => r.trip_id && (r.start_time || r.end_time || (r.lat && r.lon))); // filas mínimas
+        buildDateOptions();
+        populateTripSelect(); // default: show trips (all dates)
+        updateModeSelect();   // fill modes for first trip
+        updateDashboard();
+      },
+      error: (err) => {
+        alert('Error al parsear CSV: ' + err.message);
+      }
+    });
+  });
+
+  // ------------------- Construye opciones de fecha (select) -------------------
+  function buildDateOptions() {
+    const dateSelect = document.getElementById('dateSelect');
+    // Mapa fecha -> Set de trip_id (para contar viajes por día)
+    const dayMap = new Map();
+    for (const row of allData) {
+      const day = extractDate(row.start_time);
+      if (!day) continue;
+      if (!dayMap.has(day)) dayMap.set(day, new Set());
+      dayMap.get(day).add(row.trip_id);
+    }
+
+    // Ordenar fechas ascendentes
+    const days = Array.from(dayMap.keys()).sort();
+    // Construir opciones (incluye "Todas las fechas")
+    let options = `<option value="all">Todas las fechas</option>`;
+    for (const d of days) {
+      const tripsCount = dayMap.get(d).size;
+      options += `<option value="${d}">${d} — ${tripsCount} viaje(s)</option>`;
+    }
+    dateSelect.innerHTML = options;
+
+    // Listener: cuando cambia la fecha, actualizamos trips automáticamente
+    dateSelect.onchange = function() {
+      populateTripSelect(this.value);
+      updateModeSelect();
+      updateDashboard();
+    };
+  }
+
+  // ------------------- Llena tripSelect según fecha (o todas) -------------------
+  function populateTripSelect(dateValue = 'all') {
+    const tripSelect = document.getElementById('tripSelect');
+    let tripsSet = new Set();
+    if (dateValue === 'all') {
+      allData.forEach(r => tripsSet.add(r.trip_id));
+    } else {
+      allData.forEach(r => {
+        const d = extractDate(r.start_time);
+        if (d === dateValue) tripsSet.add(r.trip_id);
+      });
+    }
+    const trips = Array.from(tripsSet).sort();
+    if (trips.length === 0) {
+      tripSelect.innerHTML = `<option value="">— sin viajes —</option>`;
+      return;
+    }
+    tripSelect.innerHTML = trips.map(t => `<option value="${t}">${t}</option>`).join('');
+    // Al cambiar trip -> actualizar modos y dashboard
+    tripSelect.onchange = () => { updateModeSelect(); updateDashboard(); };
+    // Selecciona el primer viaje por defecto y actualiza
+    tripSelect.value = trips[0];
+    updateModeSelect();
+    updateDashboard();
+  }
+
+  // ------------------- Llena modeSelect en base al trip seleccionado -------------------
+  function updateModeSelect() {
+    const modeSelect = document.getElementById('modeSelect');
+    const trip = document.getElementById('tripSelect').value;
+    if (!trip) { modeSelect.innerHTML = `<option value="">Todos</option>`; return; }
+    const modes = new Set(allData.filter(r=>r.trip_id===trip).map(r=>r.transport_mode).filter(Boolean));
+    const modesArr = Array.from(modes);
+    modeSelect.innerHTML = `<option value="">Todos</option>` + modesArr.map(m=>`<option value="${m}">${m}</option>`).join('');
+    modeSelect.onchange = updateDashboard;
+  }
+
+  // ------------------- Actualiza mapa, métricas y gráficos -------------------
+  function updateDashboard() {
+    const dateValue = document.getElementById('dateSelect').value;
+    const trip = document.getElementById('tripSelect').value;
+    const mode = document.getElementById('modeSelect').value;
+
+    // Filtrado lógico: si date != all -> filtra por día; luego por trip; luego por mode
+    let filtered = allData.slice();
+    if (dateValue && dateValue !== 'all') {
+      filtered = filtered.filter(r => extractDate(r.start_time) === dateValue);
+    }
+    if (trip) filtered = filtered.filter(r => r.trip_id === trip);
+    if (mode) filtered = filtered.filter(r => r.transport_mode === mode);
+
+    if (!filtered.length) {
+      // limpiar visuales si no hay datos
+      clearMapAndCharts();
+      document.getElementById('analysisText').innerText = 'No hay datos para la combinación seleccionada.';
+      document.getElementById('totalDistance').innerText = '—';
+      document.getElementById('totalDuration').innerText = '—';
+      document.getElementById('avgSpeed').innerText = '—';
+      document.getElementById('checkpointCount').innerText = '0';
+      return;
+    }
+
+    // Ordena por seq_index o por start_time si seq_index no existe
+    filtered.sort((a,b) => {
+      const ai = Number(a.seq_index);
+      const bi = Number(b.seq_index);
+      if (!isNaN(ai) && !isNaN(bi)) return ai - bi;
+      const ad = new Date(a.start_time || a.end_time || 0);
+      const bd = new Date(b.start_time || b.end_time || 0);
+      return ad - bd;
+    });
+
+    // ---- Mapa ----
+    // limpia marcadores y polyline previos
+    markers.forEach(m=>map.removeLayer(m));
+    markers = [];
+    if (polyline) { map.removeLayer(polyline); polyline = null; }
+
+    const latlngs = filtered.map(r => [Number(r.lat), Number(r.lon)]).filter(p => !isNaN(p[0]) && !isNaN(p[1]));
+    if (latlngs.length) {
+      polyline = L.polyline(latlngs, { color: '#2b6cb0', weight: 3 }).addTo(map);
+      map.fitBounds(polyline.getBounds(), {padding:[30,30]});
+    }
+
+    // marcadores codificados
+    filtered.forEach(r => {
+      const ev = (r.event_type || '').toString().toLowerCase();
+      let color = '#6c757d';
+      if (ev.includes('departure')) color = '#17a2b8';
+      if (ev.includes('checkpoint')) color = '#ffb020';
+      if (ev.includes('arrive')) color = '#28a745';
+      if (!r.lat || !r.lon) return;
+      const m = L.circleMarker([Number(r.lat), Number(r.lon)], { radius:6, fillColor: color, color:'#fff', weight:1.2 }).addTo(map);
+      const popup = `<b>${r.event_type}</b><br/>trip: ${r.trip_id}<br/>seq: ${r.seq_index || '-'}<br/>${r.note || ''}<br/>bat: ${r.battery_percent||'-'}%`;
+      m.bindPopup(popup);
+      markers.push(m);
+    });
+
+    // ---- Métricas ----
+    // distancia total sumatoria de distance_km si existe
+    const totalDistance = filtered.reduce((s,r)=> s + (Number(r.distance_km) || 0), 0);
+    // duración desde primer start_time hasta último end_time (fallback: sum durations)
+    let durationMin = 0;
+    const first = filtered[0], last = filtered[filtered.length-1];
+    if (first.start_time && last.end_time) {
+      const d = (new Date(last.end_time) - new Date(first.start_time))/60000;
+      if (!isNaN(d)) durationMin = d;
+    }
+    if (!durationMin) durationMin = filtered.reduce((s,r)=> s + (Number(r.duration_m) || 0), 0);
+
+    const avgSpeed = (durationMin > 0) ? (totalDistance / (durationMin/60)) : (filtered.reduce((s,r)=> s + (Number(r.speed_kmh)||0),0)/filtered.length);
+
+    document.getElementById('totalDistance').innerText = `${totalDistance.toFixed(2)} km`;
+    document.getElementById('totalDuration').innerText = `${Math.floor(durationMin/60)}h ${Math.round(durationMin%60)}m`;
+    document.getElementById('avgSpeed').innerText = `${isNaN(avgSpeed) ? '—' : avgSpeed.toFixed(1) + ' km/h'}`;
+    document.getElementById('checkpointCount').innerText = filtered.filter(r=> (r.event_type||'').toLowerCase().includes('checkpoint')).length;
+
+    // ---- Datos para gráficas ----
+    const labels = filtered.map((r,i) => `#${r.seq_index||i}`);
+    const speeds = filtered.map(r => Number(r.speed_kmh) || null);
+    const battery = filtered.map(r => (r.battery_percent !== undefined ? Number(r.battery_percent) : null));
+    // distancia acumulada: si rows traen distance_km como acumulado o por tramo, el diseño original lo asumía;
+    // aquí haremos acumulado simple sumando distance_km (si faltan valores usar haversine si lat/lon disponibles)
+    let cum = 0;
+    const distPoints = filtered.map(r => {
+      let d = Number(r.distance_km);
+      if (isNaN(d)) d = 0;
+      cum += d;
+      return Number(cum.toFixed(3));
+    });
+
+    const altitude = filtered.map(r => Number(r.altitude_m) || null);
+    const slope = filtered.map(r => Number(r.slope_percent) || null);
+
+    renderLineChart('speedChart', labels, speeds, 'Velocidad (km/h)');
+    renderLineChart('batteryChart', labels, battery, 'Batería (%)', {yMax:100});
+    renderLineChart('distanceChart', labels, distPoints, 'Distancia acumulada (km)');
+    renderLineChart('altitudeChart', labels, altitude, 'Altitud (m)');
+    renderLineChart('slopeChart', labels, slope, 'Pendiente (%)');
+    renderScatter('speedSlopeChart', slope, speeds, 'Velocidad vs Pendiente');
+
+    // ---- Análisis automático breve ----
+    const b0 = battery.find(x=>x!=null), bEnd = battery.slice().reverse().find(x=>x!=null);
+    let battNote = 'No hay datos de batería.';
+    if (b0 !== undefined && bEnd !== undefined) {
+      battNote = `Batería: ${b0}% → ${bEnd}% (${(bEnd - b0 >=0 ? '+' : '') + (bEnd - b0)} pts).`;
+    }
+    const minAlt = altitude.filter(x=>x!=null).length ? Math.min(...altitude.filter(x=>x!=null)) : null;
+    const maxAlt = altitude.filter(x=>x!=null).length ? Math.max(...altitude.filter(x=>x!=null)) : null;
+    let altNote = (minAlt!==null) ? `Altitud: ${minAlt} m → ${maxAlt} m.` : 'No hay datos de altitud.';
+    document.getElementById('analysisText').innerText = `Viaje ${trip} — ${totalDistance.toFixed(2)} km en ${Math.round(durationMin)} min. ${battNote} ${altNote}`;
+  }
+
+  // ------------------- Helpers gráficos -------------------
+  function renderLineChart(id, labels, data, label, opts={}) {
+    const ctx = document.getElementById(id);
+    if (charts[id]) charts[id].destroy();
+    charts[id] = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets: [{ label, data, fill:false, tension:0.25, borderColor:'#1976d2', pointRadius:3 }] },
+      options: {
+        responsive: true,
+        plugins: { legend: { display:false } },
+        scales: { y: { beginAtZero:true, max: opts.yMax || undefined } }
+      }
+    });
+  }
+
+  function renderScatter(id, xData, yData, label) {
+    const ctx = document.getElementById(id);
+    if (charts[id]) charts[id].destroy();
+    const points = xData.map((x,i)=> ({x: (x===null? null : x), y: (yData[i]===null? null : yData[i])})).filter(p => p.x!==null && p.y!==null);
+    charts[id] = new Chart(ctx, {
+      type: 'scatter',
+      data: { datasets: [{ label, data: points, backgroundColor:'#9c27b0' }] },
+      options: { responsive:true, scales: { x:{ title:{display:true, text:'Pendiente (%)'} }, y:{ title:{display:true, text:'Velocidad (km/h)'} } } }
+    });
+  }
+
+  // Limpia mapa y charts
+  function clearMapAndCharts() {
+    markers.forEach(m=>map.removeLayer(m)); markers = [];
+    if (polyline) { map.removeLayer(polyline); polyline = null; }
+    for (const k in charts) { if (charts[k]) charts[k].destroy(); charts[k] = null; }
+  }
+
+  // Iniciar
+  initMap();
+
+  </script>
+</body>
+</html>
