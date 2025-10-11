@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Journeys Logger - Villanueva</title>
 
   <!-- Bootstrap 5 -->
@@ -17,23 +17,22 @@
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 
   <style>
-    body { background:#f8f9fa; -webkit-overflow-scrolling: touch; }
+    body { background:#f8f9fa; }
     #map { height:460px; border-radius:8px; }
     .metric-box { background:#fff; padding:12px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }
-    .chart-container { background:#fff; padding:10px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-bottom:16px; }
+    .chart-container { background:#fff; padding:10px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-bottom:16px; max-height:420px; overflow:hidden; }
     h6.chart-title { margin:0 0 6px 0; font-weight:600; font-size:0.95rem; text-align:center; }
-
-    /* Evitar zoom al hacer tap en inputs/select en iOS */
-    input, select, button {
-      font-size: 16px !important;
-    }
+    /* ensure inputs don't trigger zoom on iOS */
+    input, select, button { font-size:16px !important; }
+    /* canvases: allow Chart.js to use canvas height attribute */
+    .chart-container canvas { display:block; width:100% !important; }
   </style>
 </head>
 <body>
   <div class="container-fluid p-4">
     <div class="row mb-3">
       <div class="col text-center">
-        <h2 class="text-primary">📍 Journeys Logger - Villanueva</h2>
+        <h2 class="text-primary">📍 Journeys Logger - Villanueva</h2>  /*Versión compatible con iOS*/
         <p class="text-muted">Visualización y análisis de telemetría — carga un .csv / .log</p>
       </div>
     </div>
@@ -42,10 +41,10 @@
     <div class="row g-3 mb-3">
       <div class="col-md-4">
         <label class="form-label">📂 Cargar archivo (.csv / .log)</label>
-        <input id="fileInput" type="file" class="form-control" accept=".csv,.log,text/csv,application/vnd.ms-excel" />
+        <!-- accept includes text/plain to let iOS show .log in picker -->
+        <input id="fileInput" type="file" class="form-control" accept=".log,text/plain,.csv" />
       </div>
 
-      <!-- selector de fechas (select con "Todas las fechas" + días con datos) -->
       <div class="col-md-3">
         <label class="form-label">📅 Fecha (días con datos)</label>
         <select id="dateSelect" class="form-select">
@@ -84,35 +83,35 @@
       <div class="col-md-4">
         <div class="chart-container">
           <h6 class="chart-title">Velocidad promedio por tramo (km/h)</h6>
-          <canvas id="speedChart"></canvas>
+          <canvas id="speedChart" height="260"></canvas>
         </div>
       </div>
       <div class="col-md-4">
         <div class="chart-container">
           <h6 class="chart-title">Batería (%) vs Evento</h6>
-          <canvas id="batteryChart"></canvas>
+          <canvas id="batteryChart" height="260"></canvas>
         </div>
       </div>
       <div class="col-md-4">
         <div class="chart-container">
           <h6 class="chart-title">Distancia acumulada (km)</h6>
-          <canvas id="distanceChart"></canvas>
+          <canvas id="distanceChart" height="260"></canvas>
         </div>
       </div>
     </div>
 
-    <!-- Gráficas adicionales solicitadas -->
+    <!-- Gráficas adicionales -->
     <div class="row">
       <div class="col-md-6">
         <div class="chart-container">
           <h6 class="chart-title">Altitud (m) vs Distancia acumulada (km)</h6>
-          <canvas id="altitudeChart"></canvas>
+          <canvas id="altitudeChart" height="260"></canvas>
         </div>
       </div>
       <div class="col-md-6">
         <div class="chart-container">
           <h6 class="chart-title">Pendiente (%) por tramo</h6>
-          <canvas id="slopeChart"></canvas>
+          <canvas id="slopeChart" height="260"></canvas>
         </div>
       </div>
     </div>
@@ -121,7 +120,7 @@
       <div class="col-12">
         <div class="chart-container">
           <h6 class="chart-title">Correlación: Velocidad (km/h) vs Pendiente (%)</h6>
-          <canvas id="speedSlopeChart"></canvas>
+          <canvas id="speedSlopeChart" height="260"></canvas>
         </div>
       </div>
     </div>
@@ -138,84 +137,77 @@
 
   </div>
 
-  <!-- Librerías -->
+  <!-- Leaflet JS -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
   <script>
-  /*************************************************************************
-   * Versión: Journeys Logger - Draft v04 (iOS compatible)
-   * Cambios iOS: meta viewport (viewport-fit=cover, max-scale=1), font-size 16 en inputs,
-   * Leaflet option tap:false y map.invalidateSize() tras carga para evitar issues en Safari iOS.
-   *
-   * El resto del código es funcionalmente equivalente al Draft v04 original.
-   *************************************************************************/
-
-  // Utilidad: extrae YYYY-MM-DD de start_time (maneja strings ISO, timestamps y objetos Date)
+  // extract date helper
   function extractDate(value) {
     if (!value && value !== 0) return null;
     if (typeof value === 'string') {
-      // 1) formato ISO al inicio: YYYY-MM-DD
       const m = value.match(/^(\d{4}-\d{2}-\d{2})/);
       if (m) return m[1];
-      // 2) si viene con espacio o slash intenta Date
       const d = new Date(value);
       if (!isNaN(d)) return d.toISOString().slice(0,10);
       return null;
     }
-    // si ya es Date u otro tipo
     const d = new Date(value);
     if (!isNaN(d)) return d.toISOString().slice(0,10);
     return null;
   }
 
-  // Inicializa el mapa y variables globales
   let map, markers=[], polyline=null, charts = {};
-  let allData = []; // array con todas las filas parseadas
+  let allData = [];
 
   function initMap() {
-    // tap:false prevents touch delay issues in some mobile browsers
-    map = L.map('map', { tap: false }).setView([19.43, -99.13], 11);
+    map = L.map('map', { tap:false }).setView([19.43, -99.13], 11);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
   }
-
-  // Iniciar mapa ahora
   initMap();
 
-  // ------------------- Lectura del archivo -------------------
+  // File input handling with content detection
   document.getElementById('fileInput').addEventListener('change', (evt) => {
     const file = evt.target.files[0];
     if (!file) return;
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      // no dynamicTyping for start_time consistency (we parse manually)
-      complete: (results) => {
-        // Filtramos filas inválidas y normalizamos keys esenciales
-        allData = results.data
-          .map(r => {
-            // Trim keys and values
-            const obj = {};
-            for (const k of Object.keys(r)) obj[k.trim()] = (r[k] !== undefined && r[k] !== null) ? String(r[k]).trim() : r[k];
-            return obj;
-          })
-          .filter(r => r.trip_id && (r.start_time || r.end_time || (r.lat && r.lon))); // filas mínimas
-        buildDateOptions();
-        populateTripSelect(); // default: show trips (all dates)
-        updateModeSelect();   // fill modes for first trip
-        updateDashboard();
-        // iOS Safari needs a slight delay to correctly render Leaflet in some contexts
-        setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 300);
-      },
-      error: (err) => {
-        alert('Error al parsear CSV: ' + err.message);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target.result;
+      // detect by content: if contains commas and line breaks -> parse as CSV
+      const looksLikeCSV = /,/.test(text) && /\\n/.test(text);
+      if (looksLikeCSV) {
+        // use PapaParse to handle quoted fields etc.
+        const res = Papa.parse(text, { header:true, skipEmptyLines:true });
+        allData = normalizeRows(res.data);
+        afterLoadFixes();
+      } else {
+        // fallback: try parsing line-by-line as CSV
+        const res = Papa.parse(text, { header:true, skipEmptyLines:true });
+        allData = normalizeRows(res.data);
+        afterLoadFixes();
       }
-    });
+    };
+    reader.readAsText(file);
   });
 
-  // ------------------- Construye opciones de fecha (select) -------------------
+  function normalizeRows(rows) {
+    return rows.map(r => {
+      const obj = {};
+      for (const k of Object.keys(r||{})) obj[k.trim()] = (r[k] !== undefined && r[k] !== null) ? String(r[k]).trim() : r[k];
+      return obj;
+    }).filter(r => r.trip_id && (r.start_time || r.end_time || (r.lat && r.lon)));
+  }
+
+  function afterLoadFixes() {
+    buildDateOptions();
+    populateTripSelect();
+    updateModeSelect();
+    updateDashboard();
+    // ensure leaflet renders on iOS
+    setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 300);
+  }
+
   function buildDateOptions() {
     const dateSelect = document.getElementById('dateSelect');
-    // Mapa fecha -> Set de trip_id (para contar viajes por día)
     const dayMap = new Map();
     for (const row of allData) {
       const day = extractDate(row.start_time);
@@ -223,28 +215,21 @@
       if (!dayMap.has(day)) dayMap.set(day, new Set());
       dayMap.get(day).add(row.trip_id);
     }
-
-    // Ordenar fechas ascendentes
     const days = Array.from(dayMap.keys()).sort();
-    // Construir opciones (incluye "Todas las fechas")
     let options = `<option value="all">Todas las fechas</option>`;
     for (const d of days) {
       const tripsCount = dayMap.get(d).size;
       options += `<option value="${d}">${d} — ${tripsCount} viaje(s)</option>`;
     }
     dateSelect.innerHTML = options;
-
-    // Listener: cuando cambia la fecha, actualizamos trips automáticamente
     dateSelect.onchange = function() {
       populateTripSelect(this.value);
       updateModeSelect();
       updateDashboard();
-      // Ensure leaflet sizes correctly on iOS after filter change
       setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 200);
     };
   }
 
-  // ------------------- Llena tripSelect según fecha (o todas) -------------------
   function populateTripSelect(dateValue = 'all') {
     const tripSelect = document.getElementById('tripSelect');
     let tripsSet = new Set();
@@ -262,15 +247,12 @@
       return;
     }
     tripSelect.innerHTML = trips.map(t => `<option value="${t}">${t}</option>`).join('');
-    // Al cambiar trip -> actualizar modos y dashboard
     tripSelect.onchange = () => { updateModeSelect(); updateDashboard(); };
-    // Selecciona el primer viaje por defecto y actualiza
     tripSelect.value = trips[0];
     updateModeSelect();
     updateDashboard();
   }
 
-  // ------------------- Llena modeSelect en base al trip seleccionado -------------------
   function updateModeSelect() {
     const modeSelect = document.getElementById('modeSelect');
     const trip = document.getElementById('tripSelect').value;
@@ -281,22 +263,17 @@
     modeSelect.onchange = updateDashboard;
   }
 
-  // ------------------- Actualiza mapa, métricas y gráficos -------------------
   function updateDashboard() {
     const dateValue = document.getElementById('dateSelect').value;
     const trip = document.getElementById('tripSelect').value;
     const mode = document.getElementById('modeSelect').value;
 
-    // Filtrado lógico: si date != all -> filtra por día; luego por trip; luego por mode
     let filtered = allData.slice();
-    if (dateValue && dateValue !== 'all') {
-      filtered = filtered.filter(r => extractDate(r.start_time) === dateValue);
-    }
+    if (dateValue && dateValue !== 'all') filtered = filtered.filter(r => extractDate(r.start_time) === dateValue);
     if (trip) filtered = filtered.filter(r => r.trip_id === trip);
     if (mode) filtered = filtered.filter(r => r.transport_mode === mode);
 
     if (!filtered.length) {
-      // limpiar visuales si no hay datos
       clearMapAndCharts();
       document.getElementById('analysisText').innerText = 'No hay datos para la combinación seleccionada.';
       document.getElementById('totalDistance').innerText = '—';
@@ -306,30 +283,24 @@
       return;
     }
 
-    // Ordena por seq_index o por start_time si seq_index no existe
     filtered.sort((a,b) => {
-      const ai = Number(a.seq_index);
-      const bi = Number(b.seq_index);
+      const ai = Number(a.seq_index), bi = Number(b.seq_index);
       if (!isNaN(ai) && !isNaN(bi)) return ai - bi;
       const ad = new Date(a.start_time || a.end_time || 0);
       const bd = new Date(b.start_time || b.end_time || 0);
       return ad - bd;
     });
 
-    // ---- Mapa ----
-    // limpia marcadores y polyline previos
-    markers.forEach(m=>map.removeLayer(m));
-    markers = [];
+    // Map
+    markers.forEach(m=>map.removeLayer(m)); markers = [];
     if (polyline) { map.removeLayer(polyline); polyline = null; }
 
     const latlngs = filtered.map(r => [Number(r.lat), Number(r.lon)]).filter(p => !isNaN(p[0]) && !isNaN(p[1]));
     if (latlngs.length) {
       polyline = L.polyline(latlngs, { color: '#2b6cb0', weight: 3 }).addTo(map);
-      // Ajuste iOS: small delay then invalidateSize()
       setTimeout(()=>{ try { map.fitBounds(polyline.getBounds(), {padding:[30,30]}); map.invalidateSize(); } catch(e){} }, 150);
     }
 
-    // marcadores codificados
     filtered.forEach(r => {
       const ev = (r.event_type || '').toString().toLowerCase();
       let color = '#6c757d';
@@ -343,10 +314,8 @@
       markers.push(m);
     });
 
-    // ---- Métricas ----
-    // distancia total sumatoria de distance_km si existe
+    // Metrics
     const totalDistance = filtered.reduce((s,r)=> s + (Number(r.distance_km) || 0), 0);
-    // duración desde primer start_time hasta último end_time (fallback: sum durations)
     let durationMin = 0;
     const first = filtered[0], last = filtered[filtered.length-1];
     if (first.start_time && last.end_time) {
@@ -362,53 +331,47 @@
     document.getElementById('avgSpeed').innerText = `${isNaN(avgSpeed) ? '—' : avgSpeed.toFixed(1) + ' km/h'}`;
     document.getElementById('checkpointCount').innerText = filtered.filter(r=> (r.event_type||'').toLowerCase().includes('checkpoint')).length;
 
-    // ---- Datos para gráficas ----
+    // Charts data
     const labels = filtered.map((r,i) => `#${r.seq_index||i}`);
     const speeds = filtered.map(r => Number(r.speed_kmh) || null);
     const battery = filtered.map(r => (r.battery_percent !== undefined ? Number(r.battery_percent) : null));
-    // distancia acumulada: sumando distance_km (fallback 0)
     let cum = 0;
-    const distPoints = filtered.map(r => {
-      let d = Number(r.distance_km);
-      if (isNaN(d)) d = 0;
-      cum += d;
-      return Number(cum.toFixed(3));
-    });
-
+    const distPoints = filtered.map(r => { let d = Number(r.distance_km); if (isNaN(d)) d = 0; cum += d; return Number(cum.toFixed(3)); });
     const altitude = filtered.map(r => Number(r.altitude_m) || null);
     const slope = filtered.map(r => Number(r.slope_percent) || null);
 
     renderLineChart('speedChart', labels, speeds, 'Velocidad (km/h)');
-    renderLineChart('batteryChart', labels, battery, 'Batería (%)', {yMax:100});
+    renderLineChart('batteryChart', labels, battery, 'Batería (%)', {yMax:100, borderColor:'#dc2626'});
     renderLineChart('distanceChart', labels, distPoints, 'Distancia acumulada (km)');
     renderLineChart('altitudeChart', labels, altitude, 'Altitud (m)');
     renderLineChart('slopeChart', labels, slope, 'Pendiente (%)');
     renderScatter('speedSlopeChart', slope, speeds, 'Velocidad vs Pendiente');
 
-    // ---- Análisis automático breve ----
+    // Analysis
     const b0 = battery.find(x=>x!=null), bEnd = battery.slice().reverse().find(x=>x!=null);
     let battNote = 'No hay datos de batería.';
-    if (b0 !== undefined && bEnd !== undefined) {
-      battNote = `Batería: ${b0}% → ${bEnd}% (${(bEnd - b0 >=0 ? '+' : '') + (bEnd - b0)} pts).`;
-    }
+    if (b0 !== undefined && bEnd !== undefined) battNote = `Batería: ${b0}% → ${bEnd}% (${(bEnd - b0 >=0 ? '+' : '') + (bEnd - b0)} pts).`;
     const minAlt = altitude.filter(x=>x!=null).length ? Math.min(...altitude.filter(x=>x!=null)) : null;
     const maxAlt = altitude.filter(x=>x!=null).length ? Math.max(...altitude.filter(x=>x!=null)) : null;
     let altNote = (minAlt!==null) ? `Altitud: ${minAlt} m → ${maxAlt} m.` : 'No hay datos de altitud.';
     document.getElementById('analysisText').innerText = `Viaje ${trip} — ${totalDistance.toFixed(2)} km en ${Math.round(durationMin)} min. ${battNote} ${altNote}`;
 
-    // Small iOS safety resize again
     setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 300);
   }
 
-  // ------------------- Helpers gráficos -------------------
   function renderLineChart(id, labels, data, label, opts={}) {
     const ctx = document.getElementById(id);
-    if (charts[id]) charts[id].destroy();
+    if (charts[id]) {
+      try { charts[id].destroy(); } catch(e) {}
+      charts[id] = null;
+    }
+    const borderColor = opts.borderColor || '#1976d2';
     charts[id] = new Chart(ctx, {
       type: 'line',
-      data: { labels, datasets: [{ label, data, fill:false, tension:0.25, borderColor:'#1976d2', pointRadius:3 }] },
+      data: { labels, datasets: [{ label, data, fill:false, tension:0.25, borderColor: borderColor, pointRadius:3 }] },
       options: {
         responsive: true,
+        maintainAspectRatio: false, // let canvas height attribute define height
         plugins: { legend: { display:false } },
         scales: { y: { beginAtZero:true, max: opts.yMax || undefined } }
       }
@@ -417,23 +380,24 @@
 
   function renderScatter(id, xData, yData, label) {
     const ctx = document.getElementById(id);
-    if (charts[id]) charts[id].destroy();
+    if (charts[id]) {
+      try { charts[id].destroy(); } catch(e) {}
+      charts[id] = null;
+    }
     const points = xData.map((x,i)=> ({x: (x===null? null : x), y: (yData[i]===null? null : yData[i])})).filter(p => p.x!==null && p.y!==null);
     charts[id] = new Chart(ctx, {
       type: 'scatter',
       data: { datasets: [{ label, data: points, backgroundColor:'#9c27b0' }] },
-      options: { responsive:true, scales: { x:{ title:{display:true, text:'Pendiente (%)'} }, y:{ title:{display:true, text:'Velocidad (km/h)'} } } }
+      options: { responsive:true, maintainAspectRatio:false, scales: { x:{ title:{display:true, text:'Pendiente (%)'} }, y:{ title:{display:true, text:'Velocidad (km/h)'} } } }
     });
   }
 
-  // Limpia mapa y charts
   function clearMapAndCharts() {
     markers.forEach(m=>map.removeLayer(m)); markers = [];
     if (polyline) { map.removeLayer(polyline); polyline = null; }
-    for (const k in charts) { if (charts[k]) charts[k].destroy(); charts[k] = null; }
+    for (const k in charts) { if (charts[k]) { try { charts[k].destroy(); } catch(e){}; charts[k] = null; } }
   }
 
-  // End of script
   </script>
 </body>
 </html>
