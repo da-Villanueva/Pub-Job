@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
   <title>Journeys Logger - Villanueva</title>
 
   <!-- Bootstrap 5 -->
@@ -17,11 +17,16 @@
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 
   <style>
-    body { background:#f8f9fa; }
+    body { background:#f8f9fa; -webkit-overflow-scrolling: touch; }
     #map { height:460px; border-radius:8px; }
     .metric-box { background:#fff; padding:12px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); }
     .chart-container { background:#fff; padding:10px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.06); margin-bottom:16px; }
     h6.chart-title { margin:0 0 6px 0; font-weight:600; font-size:0.95rem; text-align:center; }
+
+    /* Evitar zoom al hacer tap en inputs/select en iOS */
+    input, select, button {
+      font-size: 16px !important;
+    }
   </style>
 </head>
 <body>
@@ -37,10 +42,10 @@
     <div class="row g-3 mb-3">
       <div class="col-md-4">
         <label class="form-label">📂 Cargar archivo (.csv / .log)</label>
-        <input id="fileInput" type="file" class="form-control" accept=".csv,.log" />
+        <input id="fileInput" type="file" class="form-control" accept=".csv,.log,text/csv,application/vnd.ms-excel" />
       </div>
 
-      <!-- === Nuevo: selector de fechas (select con "Todas las fechas" + días con datos) === -->
+      <!-- selector de fechas (select con "Todas las fechas" + días con datos) -->
       <div class="col-md-3">
         <label class="form-label">📅 Fecha (días con datos)</label>
         <select id="dateSelect" class="form-select">
@@ -138,11 +143,11 @@
 
   <script>
   /*************************************************************************
-   * Versión corregida:
-   * - dateSelect es un <select> que muestra "Todas las fechas" + días con datos (y # de viajes)
-   * - extrae la fecha desde start_time de forma robusta (regex o Date)
-   * - al seleccionar fecha -> actualiza trips disponibles; al seleccionar trip -> actualiza modos
-   * - sin botón "aplicar": los select se actualizan automáticamente
+   * Versión: Journeys Logger - Draft v04 (iOS compatible)
+   * Cambios iOS: meta viewport (viewport-fit=cover, max-scale=1), font-size 16 en inputs,
+   * Leaflet option tap:false y map.invalidateSize() tras carga para evitar issues en Safari iOS.
+   *
+   * El resto del código es funcionalmente equivalente al Draft v04 original.
    *************************************************************************/
 
   // Utilidad: extrae YYYY-MM-DD de start_time (maneja strings ISO, timestamps y objetos Date)
@@ -152,7 +157,7 @@
       // 1) formato ISO al inicio: YYYY-MM-DD
       const m = value.match(/^(\d{4}-\d{2}-\d{2})/);
       if (m) return m[1];
-      // 2) si viene con espacio o slash (ej: "2025/10/06 08:00" o "10/06/2025 08:00") intenta Date
+      // 2) si viene con espacio o slash intenta Date
       const d = new Date(value);
       if (!isNaN(d)) return d.toISOString().slice(0,10);
       return null;
@@ -168,9 +173,13 @@
   let allData = []; // array con todas las filas parseadas
 
   function initMap() {
-    map = L.map('map').setView([19.43, -99.13], 11);
+    // tap:false prevents touch delay issues in some mobile browsers
+    map = L.map('map', { tap: false }).setView([19.43, -99.13], 11);
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap' }).addTo(map);
   }
+
+  // Iniciar mapa ahora
+  initMap();
 
   // ------------------- Lectura del archivo -------------------
   document.getElementById('fileInput').addEventListener('change', (evt) => {
@@ -194,6 +203,8 @@
         populateTripSelect(); // default: show trips (all dates)
         updateModeSelect();   // fill modes for first trip
         updateDashboard();
+        // iOS Safari needs a slight delay to correctly render Leaflet in some contexts
+        setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 300);
       },
       error: (err) => {
         alert('Error al parsear CSV: ' + err.message);
@@ -228,6 +239,8 @@
       populateTripSelect(this.value);
       updateModeSelect();
       updateDashboard();
+      // Ensure leaflet sizes correctly on iOS after filter change
+      setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 200);
     };
   }
 
@@ -312,7 +325,8 @@
     const latlngs = filtered.map(r => [Number(r.lat), Number(r.lon)]).filter(p => !isNaN(p[0]) && !isNaN(p[1]));
     if (latlngs.length) {
       polyline = L.polyline(latlngs, { color: '#2b6cb0', weight: 3 }).addTo(map);
-      map.fitBounds(polyline.getBounds(), {padding:[30,30]});
+      // Ajuste iOS: small delay then invalidateSize()
+      setTimeout(()=>{ try { map.fitBounds(polyline.getBounds(), {padding:[30,30]}); map.invalidateSize(); } catch(e){} }, 150);
     }
 
     // marcadores codificados
@@ -352,8 +366,7 @@
     const labels = filtered.map((r,i) => `#${r.seq_index||i}`);
     const speeds = filtered.map(r => Number(r.speed_kmh) || null);
     const battery = filtered.map(r => (r.battery_percent !== undefined ? Number(r.battery_percent) : null));
-    // distancia acumulada: si rows traen distance_km como acumulado o por tramo, el diseño original lo asumía;
-    // aquí haremos acumulado simple sumando distance_km (si faltan valores usar haversine si lat/lon disponibles)
+    // distancia acumulada: sumando distance_km (fallback 0)
     let cum = 0;
     const distPoints = filtered.map(r => {
       let d = Number(r.distance_km);
@@ -382,6 +395,9 @@
     const maxAlt = altitude.filter(x=>x!=null).length ? Math.max(...altitude.filter(x=>x!=null)) : null;
     let altNote = (minAlt!==null) ? `Altitud: ${minAlt} m → ${maxAlt} m.` : 'No hay datos de altitud.';
     document.getElementById('analysisText').innerText = `Viaje ${trip} — ${totalDistance.toFixed(2)} km en ${Math.round(durationMin)} min. ${battNote} ${altNote}`;
+
+    // Small iOS safety resize again
+    setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 300);
   }
 
   // ------------------- Helpers gráficos -------------------
@@ -417,9 +433,7 @@
     for (const k in charts) { if (charts[k]) charts[k].destroy(); charts[k] = null; }
   }
 
-  // Iniciar
-  initMap();
-
+  // End of script
   </script>
 </body>
 </html>
