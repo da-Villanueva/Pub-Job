@@ -308,7 +308,31 @@
       if (ev.includes('checkpoint')) color = '#ffb020';
       if (ev.includes('arrive')) color = '#28a745';
       if (!r.lat || !r.lon) return;
-      const m = L.circleMarker([Number(r.lat), Number(r.lon)], { radius:6, fillColor: color, color:'#fff', weight:1.2 }).addTo(map);
+      
+      let m;
+      if (ev.includes('departure')) {
+        m = L.marker([Number(r.lat), Number(r.lon)], { 
+          icon: L.divIcon({
+            className: 'custom-emoji-marker',
+            html: '<span style="font-size:20px;">📍</span>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 20]
+          })
+        }).addTo(map);
+      } else if (ev.includes('arrive')) {
+        const offsetLat = Number(r.lat) + 0.0000; // slightly offset to distinguish
+        m = L.marker([offsetLat, Number(r.lon)], {
+          icon: L.divIcon({
+            className: 'custom-emoji-marker',
+            html: '<span style="font-size:20px;">🏁</span>',
+            iconSize: [20, 20],
+            iconAnchor: [10, 20]
+          })
+        }).addTo(map);
+      } else {
+        m = L.circleMarker([Number(r.lat), Number(r.lon)], { radius:6, fillColor: color, color:'#fff', weight:1.2 }).addTo(map);
+      }
+    
       const popup = `<b>${r.event_type}</b><br/>trip: ${r.trip_id}<br/>seq: ${r.seq_index || '-'}<br/>${r.note || ''}<br/>bat: ${r.battery_percent||'-'}%`;
       m.bindPopup(popup);
       markers.push(m);
