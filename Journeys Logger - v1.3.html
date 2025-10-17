@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Journeys Logger - Villanueva</title>
+  <title>Journeys Logger - Vi|llanueva</title>
 
   <!-- Bootstrap 5 -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -172,19 +172,10 @@
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target.result;
-      // detect by content: if contains commas and line breaks -> parse as CSV
-      const looksLikeCSV = /,/.test(text) && /\\n/.test(text);
-      if (looksLikeCSV) {
-        // use PapaParse to handle quoted fields etc.
-        const res = Papa.parse(text, { header:true, skipEmptyLines:true });
-        allData = normalizeRows(res.data);
-        afterLoadFixes();
-      } else {
-        // fallback: try parsing line-by-line as CSV
-        const res = Papa.parse(text, { header:true, skipEmptyLines:true });
-        allData = normalizeRows(res.data);
-        afterLoadFixes();
-      }
+      // use PapaParse to handle quoted fields etc.
+      const res = Papa.parse(text, { header:true, skipEmptyLines:true });
+      allData = normalizeRows(res.data);
+      afterLoadFixes();
     };
     reader.readAsText(file);
   });
@@ -263,17 +254,83 @@
     modeSelect.onchange = updateDashboard;
   }
 
+  // NEW: apply filtering rules per trip to include/exclude records based on event_type and note (case-sensitive)
+  function applySmartFiltering(rows) {
+    // rows: array of records already filtered by date/trip/mode
+    // We need to group by trip_id and apply rules per trip
+    const byTrip = {};
+    rows.forEach(r => {
+      const id = r.trip_id || 'unknown';
+      if (!byTrip[id]) byTrip[id] = [];
+      byTrip[id].push(r);
+    });
+    const result = [];
+    Object.keys(byTrip).forEach(tid => {
+      const group = byTrip[tid];
+      // check if there exists any Checkpoint in the original group (exact match "Checkpoint")
+      const hasAnyCheckpoint = group.some(g => g.event_type === 'Checkpoint');
+      group.forEach(g => {
+        const et = g.event_type;
+        const note = g.note;
+        let include = false;
+        if (et === 'Departure') include = true;
+        else if (et === 'Checkpoint') {
+          if (note === 'Tramo') include = true;
+          // if note === 'Acumulado' -> include only when no checkpoints exist (handled below)
+        } else if (et === 'Arrive') {
+          // Arrive should be included for MAP visualization always.
+          // For inclusion in calculations we will decide later (outside this function).
+          include = true;
+        }
+        // handle Acumulado: include only if no checkpoints exist in trip
+        if (!include && note === 'Acumulado' && !hasAnyCheckpoint) include = true;
+        if (include) result.push(g);
+      });
+    });
+    // preserve original ordering by seq_index/date where possible
+    result.sort((a,b) => {
+      const ai = Number(a.seq_index), bi = Number(b.seq_index);
+      if (!isNaN(ai) && !isNaN(bi)) return ai - bi;
+      const ad = new Date(a.start_time || a.end_time || 0);
+      const bd = new Date(b.start_time || b.end_time || 0);
+      return ad - bd;
+    });
+    return result;
+  }
+
   function updateDashboard() {
     const dateValue = document.getElementById('dateSelect').value;
     const trip = document.getElementById('tripSelect').value;
     const mode = document.getElementById('modeSelect').value;
 
-    let filtered = allData.slice();
-    if (dateValue && dateValue !== 'all') filtered = filtered.filter(r => extractDate(r.start_time) === dateValue);
-    if (trip) filtered = filtered.filter(r => r.trip_id === trip);
-    if (mode) filtered = filtered.filter(r => r.transport_mode === mode);
+    let filteredOrig = allData.slice();
+    if (dateValue && dateValue !== 'all') filteredOrig = filteredOrig.filter(r => extractDate(r.start_time) === dateValue);
+    if (trip) filteredOrig = filteredOrig.filter(r => r.trip_id === trip);
+    if (mode) filteredOrig = filteredOrig.filter(r => r.transport_mode === mode);
 
-    if (!filtered.length) {
+    // Determine per-trip presence of any checkpoint (from original filtered set)
+    const tripHasAnyCheckpoint = {};
+    filteredOrig.forEach(r => {
+      const id = r.trip_id || 'unknown';
+      if (!tripHasAnyCheckpoint[id]) tripHasAnyCheckpoint[id] = false;
+      if (r.event_type === 'Checkpoint') tripHasAnyCheckpoint[id] = true;
+    });
+
+    // Apply smart filtering rules per trip (this returns rows to USE for MAP and general inclusion)
+    const filteredForMap = applySmartFiltering(filteredOrig);
+
+    // For CALCULATIONS we must exclude Arrive if the trip has any Checkpoint.
+    // But if the trip has NO checkpoints (only Departure+Arrive or Acumulado), Arrive should be included.
+    const calcRows = filteredForMap.filter(r => {
+      if (r.event_type === 'Arrive') {
+        const id = r.trip_id || 'unknown';
+        return !tripHasAnyCheckpoint[id]; // include Arrive in calculations only if no checkpoints exist in that trip
+      }
+      return true;
+    });
+
+    // If no rows to visualize/calculations
+    if (!filteredForMap.length) {
       clearMapAndCharts();
       document.getElementById('analysisText').innerText = 'No hay datos para la combinación seleccionada.';
       document.getElementById('totalDistance').innerText = '—';
@@ -283,35 +340,27 @@
       return;
     }
 
-    filtered.sort((a,b) => {
-      const ai = Number(a.seq_index), bi = Number(b.seq_index);
-      if (!isNaN(ai) && !isNaN(bi)) return ai - bi;
-      const ad = new Date(a.start_time || a.end_time || 0);
-      const bd = new Date(b.start_time || b.end_time || 0);
-      return ad - bd;
-    });
-
-    // Map
+    // Map: use filteredForMap (includes Arrive as marker always)
     markers.forEach(m=>map.removeLayer(m)); markers = [];
     if (polyline) { map.removeLayer(polyline); polyline = null; }
 
-    const latlngs = filtered.map(r => [Number(r.lat), Number(r.lon)]).filter(p => !isNaN(p[0]) && !isNaN(p[1]));
+    const latlngs = filteredForMap.map(r => [Number(r.lat), Number(r.lon)]).filter(p => !isNaN(p[0]) && !isNaN(p[1]));
     if (latlngs.length) {
       polyline = L.polyline(latlngs, { color: '#2b6cb0', weight: 3 }).addTo(map);
       setTimeout(()=>{ try { map.fitBounds(polyline.getBounds(), {padding:[30,30]}); map.invalidateSize(); } catch(e){} }, 150);
     }
 
-    filtered.forEach(r => {
-      const ev = (r.event_type || '').toString().toLowerCase();
+    filteredForMap.forEach(r => {
+      const ev = (r.event_type || '').toString();
       let color = '#6c757d';
-      if (ev.includes('departure')) color = '#17a2b8';
-      if (ev.includes('checkpoint')) color = '#ffb020';
-      if (ev.includes('arrive')) color = '#28a745';
+      if (ev === 'Departure') color = '#17a2b8';
+      if (ev === 'Checkpoint') color = '#ffb020';
+      if (ev === 'Arrive') color = '#28a745';
       if (!r.lat || !r.lon) return;
-      
+
       let m;
-      if (ev.includes('departure')) {
-        m = L.marker([Number(r.lat), Number(r.lon)], { 
+      if (ev === 'Departure') {
+        m = L.marker([Number(r.lat), Number(r.lon)], {
           icon: L.divIcon({
             className: 'custom-emoji-marker',
             html: '<span style="font-size:20px;">📍</span>',
@@ -319,8 +368,8 @@
             iconAnchor: [10, 20]
           })
         }).addTo(map);
-      } else if (ev.includes('arrive')) {
-        const offsetLat = Number(r.lat) + 0.0000; // slightly offset to distinguish
+      } else if (ev === 'Arrive') {
+        const offsetLat = Number(r.lat) + 0.0000;
         m = L.marker([offsetLat, Number(r.lon)], {
           icon: L.divIcon({
             className: 'custom-emoji-marker',
@@ -332,37 +381,38 @@
       } else {
         m = L.circleMarker([Number(r.lat), Number(r.lon)], { radius:6, fillColor: color, color:'#fff', weight:1.2 }).addTo(map);
       }
-    
+
       const popup = `<b>${r.event_type}</b><br/>trip: ${r.trip_id}<br/>seq: ${r.seq_index || '-'}<br/>${r.note || ''}<br/>bat: ${r.battery_percent||'-'}%`;
       m.bindPopup(popup);
       markers.push(m);
     });
 
-    // Metrics
-    const totalDistance = filtered.reduce((s,r)=> s + (Number(r.distance_km) || 0), 0);
+    // Metrics: use calcRows (Arrive excluded if trip has checkpoints)
+    const totalDistance = calcRows.reduce((s,r)=> s + (Number(r.distance_km) || 0), 0);
     let durationMin = 0;
-    const first = filtered[0], last = filtered[filtered.length-1];
-    if (first.start_time && last.end_time) {
+    const first = calcRows[0], last = calcRows[calcRows.length-1];
+    if (first && last && first.start_time && last.end_time) {
       const d = (new Date(last.end_time) - new Date(first.start_time))/60000;
       if (!isNaN(d)) durationMin = d;
     }
-    if (!durationMin) durationMin = filtered.reduce((s,r)=> s + (Number(r.duration_m) || 0), 0);
+    if (!durationMin) durationMin = calcRows.reduce((s,r)=> s + (Number(r.duration_m) || 0), 0);
 
-    const avgSpeed = (durationMin > 0) ? (totalDistance / (durationMin/60)) : (filtered.reduce((s,r)=> s + (Number(r.speed_kmh)||0),0)/filtered.length);
+    const avgSpeed = (durationMin > 0) ? (totalDistance / (durationMin/60)) : (calcRows.reduce((s,r)=> s + (Number(r.speed_kmh)||0),0)/Math.max(1,calcRows.length));
 
     document.getElementById('totalDistance').innerText = `${totalDistance.toFixed(2)} km`;
     document.getElementById('totalDuration').innerText = `${Math.floor(durationMin/60)}h ${Math.round(durationMin%60)}m`;
     document.getElementById('avgSpeed').innerText = `${isNaN(avgSpeed) ? '—' : avgSpeed.toFixed(1) + ' km/h'}`;
-    document.getElementById('checkpointCount').innerText = filtered.filter(r=> (r.event_type||'').toLowerCase().includes('checkpoint')).length;
+    // checkpoint count based on filteredForMap inclusion (only Tramo were included)
+    document.getElementById('checkpointCount').innerText = filteredForMap.filter(r=> (r.event_type||'') === 'Checkpoint').length;
 
-    // Charts data
-    const labels = filtered.map((r,i) => `#${r.seq_index||i}`);
-    const speeds = filtered.map(r => Number(r.speed_kmh) || null);
-    const battery = filtered.map(r => (r.battery_percent !== undefined ? Number(r.battery_percent) : null));
+    // Charts data based on calcRows
+    const labels = calcRows.map((r,i) => `#${r.seq_index||i}`);
+    const speeds = calcRows.map(r => Number(r.speed_kmh) || null);
+    const battery = calcRows.map(r => (r.battery_percent !== undefined ? Number(r.battery_percent) : null));
     let cum = 0;
-    const distPoints = filtered.map(r => { let d = Number(r.distance_km); if (isNaN(d)) d = 0; cum += d; return Number(cum.toFixed(3)); });
-    const altitude = filtered.map(r => Number(r.altitude_m) || null);
-    const slope = filtered.map(r => Number(r.slope_percent) || null);
+    const distPoints = calcRows.map(r => { let d = Number(r.distance_km); if (isNaN(d)) d = 0; cum += d; return Number(cum.toFixed(3)); });
+    const altitude = calcRows.map(r => Number(r.altitude_m) || null);
+    const slope = calcRows.map(r => Number(r.slope_percent) || null);
 
     renderLineChart('speedChart', labels, speeds, 'Velocidad (km/h)');
     renderLineChart('batteryChart', labels, battery, 'Batería (%)', {yMax:100, borderColor:'#dc2626'});
@@ -375,10 +425,11 @@
     const b0 = battery.find(x=>x!=null), bEnd = battery.slice().reverse().find(x=>x!=null);
     let battNote = 'No hay datos de batería.';
     if (b0 !== undefined && bEnd !== undefined) battNote = `Batería: ${b0}% → ${bEnd}% (${(bEnd - b0 >=0 ? '+' : '') + (bEnd - b0)} pts).`;
-    const minAlt = altitude.filter(x=>x!=null).length ? Math.min(...altitude.filter(x=>x!=null)) : null;
-    const maxAlt = altitude.filter(x=>x!=null).length ? Math.max(...altitude.filter(x=>x!=null)) : null;
+    const altVals = altitude.filter(x=>x!=null);
+    const minAlt = altVals.length ? Math.min(...altVals) : null;
+    const maxAlt = altVals.length ? Math.max(...altVals) : null;
     let altNote = (minAlt!==null) ? `Altitud: ${minAlt} m → ${maxAlt} m.` : 'No hay datos de altitud.';
-    document.getElementById('analysisText').innerText = `Viaje ${trip} — ${totalDistance.toFixed(2)} km en ${Math.round(durationMin)} min. ${battNote} ${altNote}`;
+    document.getElementById('analysisText').innerText = `Viaje ${trip || '(varios)'} — ${totalDistance.toFixed(2)} km en ${Math.round(durationMin)} min. ${battNote} ${altNote}`;
 
     setTimeout(()=>{ try { map.invalidateSize(); } catch(e){} }, 300);
   }
@@ -395,7 +446,7 @@
       data: { labels, datasets: [{ label, data, fill:false, tension:0.25, borderColor: borderColor, pointRadius:3 }] },
       options: {
         responsive: true,
-        maintainAspectRatio: false, // let canvas height attribute define height
+        maintainAspectRatio: false,
         plugins: { legend: { display:false } },
         scales: { y: { beginAtZero:true, max: opts.yMax || undefined } }
       }
