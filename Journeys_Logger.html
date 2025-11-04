@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Journeys Logger - Villanueva v1.3</title>
+  <title>Journeys Logger - Villanueva v1.4</title>
 
   <!-- Bootstrap 5 -->
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -57,10 +57,11 @@
         <select id="tripSelect" class="form-select"><option value="">—</option></select>
       </div>
 
+<!-- // Por el momento 🚗 Transporte debe mantenerse comentado en esta posisión sin modificar el resto del código que esté directamente vinculado a esta sección. 
       <div class="col-md-2">
         <label class="form-label">🚗 Transporte</label>
         <select id="modeSelect" class="form-select"><option value="">Todos</option></select>
-      </div>
+      </div> -->
     </div>
 
     <!-- Mapa -->
@@ -206,7 +207,12 @@
       if (!dayMap.has(day)) dayMap.set(day, new Set());
       dayMap.get(day).add(row.trip_id);
     }
-    const days = Array.from(dayMap.keys()).sort();
+        
+    // Obtener las fechas únicas
+    const days = Array.from(dayMap.keys())
+      .sort((a, b) => new Date(b) - new Date(a));  // orden descendente (más recientes primero)
+
+    // Generar el HTML de opciones, manteniendo "Todas las fechas" al inicio
     let options = `<option value="all">Todas las fechas</option>`;
     for (const d of days) {
       const tripsCount = dayMap.get(d).size;
@@ -232,7 +238,16 @@
         if (d === dateValue) tripsSet.add(r.trip_id);
       });
     }
-    const trips = Array.from(tripsSet).sort();
+    
+    const trips = Array.from(tripsSet).sort((a, b) => {
+     // si son numéricos, ordenar numéricamente
+     const na = Number(a), nb = Number(b);
+     if (!isNaN(na) && !isNaN(nb)) return nb - na;
+  
+     // si son alfanuméricos, ordenar Z → A
+     return (a > b ? -1 : 1);
+   });
+
     if (trips.length === 0) {
       tripSelect.innerHTML = `<option value="">— sin viajes —</option>`;
       return;
@@ -243,7 +258,7 @@
     updateModeSelect();
     updateDashboard();
   }
-
+  
   function updateModeSelect() {
     const modeSelect = document.getElementById('modeSelect');
     const trip = document.getElementById('tripSelect').value;
