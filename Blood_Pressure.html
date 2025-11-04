@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Blood Pressure v1.3</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    margin: 20px;
+    background: #f5f7fa;
+    color: #222;
+  }
+  h1 { text-align:center; color:#005b96; }
+  .uploader {
+    display:flex; justify-content:center; gap:10px; margin-bottom:12px; align-items:center;
+  }
+  input[type="file"], select {
+    padding:8px 10px; border-radius:6px; border:1px solid #ccc; background:#fff;
+  }
+  canvas {
+    width:100%; max-width:100%; height:400px; background:#fff; border:1px solid #ddd; border-radius:6px;
+    display:block; margin: 12px 0;
+  }
+  table {
+    width:100%; border-collapse:collapse; margin-top:12px; background:#fff; border-radius:6px; overflow:hidden;
+  }
+  th, td { padding:8px; text-align:center; border-bottom:1px solid #ddd; }
+  th { background:#e3f2fd; font-weight:700; }
+  tr:hover { background:#f1f8ff; }
+
+  .cell-normal { background-color:#d9f2d9; } 
+  .cell-yellow { background-color:#fff4cc; }
+  .cell-orange { background-color:#ffe0b3; }
+  .cell-red { background-color:#f8b6b6; }
+</style>
+</head>
+<body>
+  <h1>📊 Análisis de Presión Sanguínea</h1>
+
+  <div class="uploader">
+    <input id="fileInput" type="file" accept=".csv,.log,text/csv,text/plain">
+    <select id="patientFilter">
+      <option value="todos">Todos los pacientes</option>
+    </select>
+  </div>
+
+  <canvas id="bpChart"></canvas>
+
+  <table id="statsTable" style="display:none;">
+    <caption style="caption-side:top; text-align:left; font-weight:bold; color:#005b96;">Resumen Estadístico del Paciente</caption>
+    <thead>
+      <tr>
+        <th>Indicador</th>
+        <th>Promedio</th>
+        <th>Desv. Estándar (±)</th>
+        <th>Máx.</th>
+        <th>Mín.</th>
+        <th>Moda</th>
+        <th>Rango</th>
+        <th>n</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <table id="dataTable">
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th>Paciente</th>
+        <th>Sistólica (Sys)</th>
+        <th>Diastólica (Dia)</th>
+        <th>Pulso (Puls_m)</th>
+        <th>Notas</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const patientFilter = document.getElementById('patientFilter');
+const ctx = document.getElementById('bpChart').getContext('2d');
+const statsTable = document.getElementById('statsTable');
+const statsBody = statsTable.querySelector('tbody');
+const dataTbody = document.querySelector('#dataTable tbody');
+
+let allData = [];
+let chart = null;
+
+// ---- formato de fecha dd/mm/aa • HH:mm (24h)
+function formatearFechaISO(fechaISO) {
+  try {
+    const f = new Date(fechaISO);
+    if (isNaN(f)) return fechaISO;
+    const dd = String(f.getDate()).padStart(2,'0');
+    const mm = String(f.getMonth()+1).padStart(2,'0');
+    const yy = String(f.getFullYear()).slice(-2);
+    const hh = String(f.getHours()).padStart(2,'0');
+    const mi = String(f.getMinutes()).padStart(2,'0');
+    return `${dd}/${mm}/${yy} • ${hh}:${mi}`;
+  } catch { return fechaISO; }
+}
+
+// --- funciones estadísticas
+function promedio(arr) { return arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : 0; }
+function desviacion(arr) {
+  if (!arr.length) return 0;
+  const m = promedio(arr);
+  return Math.sqrt(arr.reduce((s,v)=>s+Math.pow(v-m,2),0)/arr.length);
+}
+function moda(arr) {
+  if (!arr.length) return '';
+  const f = {};
+  arr.forEach(v => f[v] = (f[v]||0)+1);
+  const maxf = Math.max(...Object.values(f));
+  return Object.keys(f).filter(k => f[k] === maxf).join(', ');
+}
+function calcularEstadisticasNumericas(arr) {
+  const nums = arr.filter(n => typeof n === 'number' && !isNaN(n));
+  if (!nums.length) return { prom: '-', desv: '-', max: '-', min: '-', mod: '-', rango: '-', n: 0 };
+  const pr = promedio(nums);
+  const dv = desviacion(nums);
+  const mx = Math.max(...nums);
+  const mn = Math.min(...nums);
+  const rg = mx - mn;
+  const md = moda(nums);
+  return { prom: pr, desv: dv, max: mx, min: mn, mod: md, rango: rg, n: nums.length };
+}
+
+// --- colores
+function clasePorValor(tipo, v) {
+  if (v === '-' || v === '' || v === null || isNaN(Number(v))) return '';
+  const val = Number(v);
+  if (tipo === 'sys') {
+    if (val >= 90 && val <= 120) return 'cell-normal';
+    if (val >= 121 && val <= 129) return 'cell-yellow';
+    if (val >= 130 && val <= 139) return 'cell-orange';
+    return 'cell-red';
+  }
+  if (tipo === 'dia') {
+    if (val >= 60 && val <= 80) return 'cell-normal';
+    if (val >= 81 && val <= 84) return 'cell-yellow';
+    if (val >= 85 && val <= 89) return 'cell-orange';
+    return 'cell-red';
+  }
+  if (tipo === 'pulso') {
+    if (val >= 60 && val <= 100) return 'cell-normal';
+    if (val >= 101 && val <= 110) return 'cell-yellow';
+    if (val >= 111 && val <= 120) return 'cell-orange';
+    return 'cell-red';
+  }
+  return '';
+}
+
+// --- resumen estadístico
+function mostrarResumen(datosFiltrados) {
+  if (!datosFiltrados || !datosFiltrados.length) {
+    statsTable.style.display = 'none';
+    statsBody.innerHTML = '';
+    return;
+  }
+
+  const sysArr = datosFiltrados.map(r => Number(r.sys)).filter(n => !isNaN(n));
+  const diaArr = datosFiltrados.map(r => Number(r.dia)).filter(n => !isNaN(n));
+  const pulArr = datosFiltrados.map(r => Number(r.pulso)).filter(n => !isNaN(n));
+
+  const s = calcularEstadisticasNumericas(sysArr);
+  const d = calcularEstadisticasNumericas(diaArr);
+  const p = calcularEstadisticasNumericas(pulArr);
+
+  statsBody.innerHTML = '';
+
+  const filas = [
+    { nombre: 'Sistólica (mmHg)', key:'sys', stats: s },
+    { nombre: 'Diastólica (mmHg)', key:'dia', stats: d },
+    { nombre: 'Pulso (bpm)', key:'pulso', stats: p }
+  ];
+
+  filas.forEach(f => {
+    const tr = document.createElement('tr');
+    const st = f.stats;
+    tr.innerHTML = `
+      <td>${f.nombre}</td>
+      <td>${(st.prom === '-')? '-' : st.prom.toFixed(1)}</td>
+      <td>${(st.desv === '-')? '-' : st.desv.toFixed(1)}</td>
+      <td>${st.max}</td>
+      <td>${st.min}</td>
+      <td>${st.mod}</td>
+      <td>${(st.rango === '-')? '-' : st.rango}</td>
+      <td>${st.n}</td>
+    `;
+
+    // aplicar clases a celdas de resumen
+    const promClass = clasePorValor(f.key, st.prom);
+    const maxClass = clasePorValor(f.key, st.max);
+    const minClass = clasePorValor(f.key, st.min);
+
+    if (promClass) tr.children[1].classList.add(promClass);
+    if (maxClass) tr.children[3].classList.add(maxClass);
+    if (minClass) tr.children[4].classList.add(minClass);
+
+    statsBody.appendChild(tr);
+  });
+
+  statsTable.style.display = 'table';
+}
+
+// --- tabla + gráfico
+function actualizarTablaYGrafica(filtroPaciente) {
+  const datosFiltrados = (filtroPaciente === 'todos' || !filtroPaciente)
+    ? allData
+    : allData.filter(r => r.paciente === filtroPaciente);
+
+  dataTbody.innerHTML = '';
+  const labels = [];
+  const sysData = [];
+  const diaData = [];
+  const pulData = [];
+
+  datosFiltrados.forEach(r => {
+    labels.push(r.fecha);
+    sysData.push(Number(r.sys));
+    diaData.push(Number(r.dia));
+    pulData.push(Number(r.pulso));
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.fecha}</td>
+      <td>${r.paciente}</td>
+      <td>${r.sys}</td>
+      <td>${r.dia}</td>
+      <td>${r.pulso}</td>
+      <td>${r.nota || ''}</td>
+    `;
+
+    // aplicar colores a columnas Sys, Dia y Pulso
+    tr.children[2].classList.add(clasePorValor('sys', r.sys));
+    tr.children[3].classList.add(clasePorValor('dia', r.dia));
+    tr.children[4].classList.add(clasePorValor('pulso', r.pulso));
+
+    dataTbody.appendChild(tr);
+  });
+
+  mostrarResumen(datosFiltrados);
+
+  if (chart) { try { chart.destroy(); } catch(e) {} }
+  if (!labels.length) return;
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Sistólica (mmHg)',
+          data: sysData,
+          borderColor: 'rgb(220,53,69)',
+          backgroundColor: 'rgba(220,53,69,0.12)',
+          tension: 0.3, pointRadius:4, fill:true
+        },
+        {
+          label: 'Diastólica (mmHg)',
+          data: diaData,
+          borderColor: 'rgb(25,135,84)',
+          backgroundColor: 'rgba(25,135,84,0.12)',
+          tension:0.3, pointRadius:4, fill:true
+        },
+        {
+          label: 'Pulso (bpm)',
+          data: pulData,
+          borderColor:'rgb(13,110,253)',
+          backgroundColor:'rgba(13,110,253,0.12)',
+          tension:0.3, pointRadius:3, fill:true
+        }
+      ]
+    },
+    options:{
+      responsive:true,
+      plugins:{ legend:{position:'top'}, title:{display:false} },
+      scales:{
+        y:{ suggestedMin:40, suggestedMax:180, title:{display:true,text:'mmHg / bpm'} },
+        x:{ title:{display:true,text:'Fecha'}, ticks:{maxRotation:45,minRotation:0} }
+      }
+    }
+  });
+}
+
+// --- lectura del archivo
+fileInput.addEventListener('change', (evt) => {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const raw = e.target.result.replace(/\r/g,'').split('\n').map(l=>l.trim()).filter(l=>l!=='');
+    if (!raw.length) return;
+    const first = raw[0].split(',').map(h=>h.trim().toLowerCase());
+    const hasHeader = ['fecha','paciente','sys','dia','puls_m','notas'].some(h=>first.includes(h));
+
+    let rows, headers=null;
+    if (hasHeader) { headers=first; rows=raw.slice(1); } else { rows=raw; }
+
+    allData = rows.map(line => {
+      const cols = line.split(',').map(c=>c.trim());
+      let fecha, paciente, sys, dia, puls, nota;
+      if (headers) {
+        const idx = n => headers.indexOf(n);
+        fecha = formatearFechaISO(cols[idx('fecha')] || cols[0]);
+        paciente = cols[idx('paciente')] || cols[1] || 'Sin nombre';
+        sys = cols[idx('sys')] || cols[2] || '';
+        dia = cols[idx('dia')] || cols[3] || '';
+        puls = cols[idx('puls_m')] || cols[4] || '';
+        nota = cols[idx('notas')] || cols[5] || '';
+      } else {
+        fecha = formatearFechaISO(cols[0] || '');
+        paciente = cols[1] || 'Sin nombre';
+        sys = cols[2] || '';
+        dia = cols[3] || '';
+        puls = cols[4] || '';
+        nota = cols[5] || '';
+      }
+      return { fecha, paciente, sys, dia, pulso:puls, nota };
+    });
+
+    const pacientes = Array.from(new Set(allData.map(r => r.paciente).filter(p=>p.trim()!=='')));
+    patientFilter.innerHTML = '<option value="todos">Todos los pacientes</option>';
+    pacientes.forEach(p=>{
+      const opt=document.createElement('option');
+      opt.value=p; opt.textContent=p; patientFilter.appendChild(opt);
+    });
+
+    actualizarTablaYGrafica('todos');
+  };
+  reader.readAsText(file);
+});
+
+patientFilter.addEventListener('change', e => actualizarTablaYGrafica(e.target.value));
+</script>
+</body>
+</html>
